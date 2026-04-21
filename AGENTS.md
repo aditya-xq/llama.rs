@@ -148,3 +148,8 @@ timeout(Duration::from_secs(5), async_operation).await
 - **Situation**: Translating OS-reported memory values into tuning heuristics
 - **Lesson**: Normalize units before storing or comparing them
 - **Example**: Convert Linux `/proc/meminfo` KiB to GiB and Windows adapter RAM bytes to MiB
+
+## Workflow: Prefer High-Signal Tests
+- **Situation**: Adding or revising unit tests around simple enums, formatting, or conversions
+- **Lesson**: Test representative behavior and meaningful edge cases instead of writing one test per trivial branch or boilerplate display string
+- **Example**: For `errors.rs`, keep a small set of tests for user-facing messages and conversion variants instead of snapshot-testing every unused enum variant

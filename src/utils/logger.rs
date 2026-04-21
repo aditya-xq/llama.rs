@@ -242,9 +242,7 @@ mod tests {
 
     #[test]
     fn test_gpu_style_nvidia() {
-        let style = Style {
-            ansi_enabled: true,
-        };
+        let style = Style { ansi_enabled: true };
         let result = gpu_style(&style, "NVIDIA RTX 3080");
         assert!(result.contains("NVIDIA RTX 3080"));
         assert!(result.contains("\x1b[38;5;108m"));
@@ -252,9 +250,7 @@ mod tests {
 
     #[test]
     fn test_gpu_style_amd() {
-        let style = Style {
-            ansi_enabled: true,
-        };
+        let style = Style { ansi_enabled: true };
         let result = gpu_style(&style, "AMD Radeon RX 6800");
         assert!(result.contains("AMD Radeon RX 6800"));
         assert!(result.contains("\x1b[38;5;166m"));
@@ -262,9 +258,7 @@ mod tests {
 
     #[test]
     fn test_gpu_style_intel() {
-        let style = Style {
-            ansi_enabled: true,
-        };
+        let style = Style { ansi_enabled: true };
         let result = gpu_style(&style, "Intel Iris Xe");
         assert!(result.contains("Intel Iris Xe"));
         assert!(result.contains("\x1b[38;5;214m"));
@@ -272,9 +266,7 @@ mod tests {
 
     #[test]
     fn test_gpu_style_unknown() {
-        let style = Style {
-            ansi_enabled: true,
-        };
+        let style = Style { ansi_enabled: true };
         let result = gpu_style(&style, "Vulkan GPU");
         assert!(result.contains("Vulkan GPU"));
         assert!(result.contains("\x1b[38;5;245m"));
