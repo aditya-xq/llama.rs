@@ -1,0 +1,55 @@
+# Contributing
+
+We welcome contributions! Please follow these guidelines.
+
+## Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/aditya-xq/llama.rs.git
+cd llama.rs
+
+# Build the project
+cargo build
+
+# Run tests
+cargo test
+
+# Run with logging
+RUST_LOG=debug cargo run -- serve --model /path/to/model.gguf --dry-run
+```
+
+## Code Style
+
+- Follow Rust standard formatting (`cargo fmt`)
+- Use clippy for linting (`cargo clippy -- -D warnings`)
+- Write idiomatic Rust
+
+## Pull Requests
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/xyz`)
+3. Make your changes
+4. Run tests and formatting (`cargo fmt && cargo clippy -- -D warnings && cargo test`)
+5. Commit with clear messages
+6. Push to your fork
+7. Submit a pull request
+
+## Commit Messages
+
+- Use clear, descriptive messages
+- Start with a verb (Add, Fix, Update, Remove)
+- Reference issues when applicable
+
+## Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test
+cargo test test_name
+
+# Run with output
+cargo test -- --nocapture
+```
