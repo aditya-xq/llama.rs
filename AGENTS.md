@@ -153,3 +153,13 @@ timeout(Duration::from_secs(5), async_operation).await
 - **Situation**: Adding or revising unit tests around simple enums, formatting, or conversions
 - **Lesson**: Test representative behavior and meaningful edge cases instead of writing one test per trivial branch or boilerplate display string
 - **Example**: For `errors.rs`, keep a small set of tests for user-facing messages and conversion variants instead of snapshot-testing every unused enum variant
+
+## Pitfalls: Missing Imports in Conditional Compilation
+- **Situation**: Using `cfg` attributes on code blocks that reference types like `std::process::Command`
+- **Lesson**: Make imports conditional with `#[cfg(...)]` when the usage is conditionally compiled
+- **Example**: `#[cfg(target_os = "linux")] use std::process::Command;` instead of top-level `use std::process::Command`
+
+## Pitfalls: Unnecessary Async Markers
+- **Situation**: Marking functions as `async` when they don't use `.await` or spawn async work
+- **Lesson**: Only mark functions as `async` if they actually need to be async (use `.await` or return a future)
+- **Example**: `fn detect_cpu() -> Result<CpuInfo>` instead of `async fn detect_cpu() -> Result<CpuInfo>` when just running sync commands
