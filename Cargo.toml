@@ -1,0 +1,65 @@
+[package]
+name = "llmr"
+version = "1.0.0"
+edition = "2021"
+description = "A tiny rust based CLI for running auto-optimized inference via llama.cpp in Docker"
+license = "MIT"
+repository = "https://github.com/aditya-xq/llama.rs"
+readme = "README.md"
+keywords = ["cli", "rust", "llama", "llama.cpp", "docker"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.0"
+tokio = { version = "1.52", features = ["fs", "time", "process", "macros", "rt", "rt-multi-thread"] }
+which = "6.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6.0"
+chrono = "0.4"
+reqwest = { version = "0.13", features = ["json"] }
+sysinfo = "0.33"
+
+[dev-dependencies]
+tokio-test = "0.4"
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.8"
+
+[[test]]
+name = "integration"
+path = "tests/integration/mod.rs"
+test = false
+
+[[test]]
+name = "unit"
+path = "tests/unit/mod.rs"
+test = false
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/cli.rs"
+test = false
+
+[[bin]]
+name = "llmr"
+path = "src/bin/llama.rs"
+
+[profile.dev]
+opt-level = 0
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+incremental = false
+
+[profile.release.package."*"]
+opt-level = 3
