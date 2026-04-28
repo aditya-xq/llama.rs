@@ -6,16 +6,11 @@ use tokio::time::timeout;
 use tracing::info;
 
 /// Indicates whether GPU memory is dedicated or shared/unified (e.g., Apple Silicon).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum GpuMemoryType {
+    #[default]
     Dedicated,
     Shared,
-}
-
-impl Default for GpuMemoryType {
-    fn default() -> Self {
-        Self::Dedicated
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
