@@ -1,5 +1,6 @@
 use crate::errors::{Error, Result};
 use crate::hardware::HardwareInfo;
+use crate::utils::Style;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -424,11 +425,29 @@ impl ProfileManager {
                 return Ok(profile);
             }
             info!("Loaded existing profile: {}", key);
+            let style = Style::plain();
+            println!(
+                "  {} Loaded profile: {} threads, {} batch, {} ctx, {} gpu layers",
+                style.success("✓"),
+                profile.threads,
+                profile.batch_size,
+                profile.context_size,
+                profile.gpu_layers
+            );
             Ok(profile)
         } else {
             info!("Creating new profile: {}", key);
             let profile = Profile::new(model_path.to_string(), model_size, hardware);
             self.save(&profile).await?;
+            let style = Style::plain();
+            println!(
+                "  {} Profile: {} threads, {} batch, {} ctx, {} gpu layers",
+                style.success("✓"),
+                profile.threads,
+                profile.batch_size,
+                profile.context_size,
+                profile.gpu_layers
+            );
             Ok(profile)
         }
     }
