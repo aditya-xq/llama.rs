@@ -65,9 +65,33 @@ impl ModelScanner {
         Self
     }
 
+    const COMMON_MODEL_DIRS: &'static [&'static str] = &[
+        "models",
+        "llama.cpp",
+        "llama.cpp/models",
+        "lm-studio",
+        "lm-studio/models",
+        "ollama",
+        "ollama/models",
+        "text-generation-webui",
+        "text-generation-webui/models",
+        "gpt4all",
+        "gpt4all/models",
+        "koboldcpp",
+        "koboldcpp/models",
+        "llama",
+        "ai",
+        "ml",
+        "deepseek",
+        "qwen",
+        "mistral",
+    ];
+
     #[cfg(target_os = "windows")]
     pub fn get_local_drives() -> Vec<PathBuf> {
         let mut drives = Vec::new();
+        let mut added_drives = std::collections::HashSet::new();
+
         let output = Command::new("wmic")
             .args(["logicaldisk", "get", "name"])
             .output();
@@ -78,7 +102,7 @@ impl ModelScanner {
                 let drive = line.trim();
                 if drive.len() == 2 && drive.ends_with(':') {
                     let path = PathBuf::from(format!(r"{drive}\"));
-                    if path.exists() {
+                    if path.exists() && added_drives.insert(drive.to_lowercase()) {
                         drives.push(path);
                     }
                 }
@@ -90,6 +114,56 @@ impl ModelScanner {
                 let drive = programdata.chars().take(2).collect::<String>();
                 if drive.len() == 2 && drive.ends_with(':') {
                     drives.push(PathBuf::from(format!(r"{drive}\")));
+                }
+            }
+        }
+
+        if let Some(home) = dirs::home_dir() {
+            let home_drive = home.to_string_lossy().chars().take(2).collect::<String>();
+            if !home_drive.is_empty() && added_drives.insert(home_drive.to_lowercase()) {
+                let drive = PathBuf::from(format!(r"{}\", home_drive));
+                if drive.exists() && !drives.contains(&drive) {
+                    drives.insert(0, drive);
+                }
+            }
+        }
+
+        drives
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_network_drives() -> Vec<PathBuf> {
+        let mut drives = Vec::new();
+        let output = Command::new("netstat")
+            .args(["-n"])
+            .output();
+
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.contains("Mapped") || line.contains("Network drive") {
+                    continue;
+                }
+            }
+        }
+
+        let output = Command::new("wmic")
+            .args(["logicaldisk", "get", "name", ",", "drivetype"])
+            .output();
+
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines().skip(1) {
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 2 {
+                    let drive = parts[0].trim();
+                    let drivetype = parts[1].trim();
+                    if drive.len() == 2 && drive.ends_with(':') && drivetype == "4" {
+                        let path = PathBuf::from(format!(r"{drive}\"));
+                        if path.exists() {
+                            drives.push(path);
+                        }
+                    }
                 }
             }
         }
@@ -112,19 +186,49 @@ impl ModelScanner {
             }
         }
 
+        if let Some(data) = dirs::data_dir() {
+            if let Some(root) = data.ancestors().next() {
+                let root_path = PathBuf::from(root.as_os_str());
+                if !drives.contains(&root_path) {
+                    drives.push(root_path);
+                }
+            }
+        }
+
         drives
     }
 
     pub fn scan_disks(&self) -> Vec<ModelInfo> {
         let mut all_models = Vec::new();
-        let drives = Self::get_local_drives();
+        let mut scanned_paths = std::collections::HashSet::new();
 
+        let common_dirs = Self::find_common_model_dirs();
+        for path in common_dirs {
+            if scanned_paths.insert(path.clone()) {
+                all_models.extend(self.scan_directory(&path));
+            }
+        }
+
+        let drives = Self::get_local_drives();
         for drive in drives {
-            self.scan_root(&drive, &mut all_models);
+            if scanned_paths.insert(drive.clone()) {
+                self.scan_root(&drive, &mut all_models, &mut scanned_paths);
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            for drive in Self::get_network_drives() {
+                if scanned_paths.insert(drive.clone()) {
+                    self.scan_root(&drive, &mut all_models, &mut scanned_paths);
+                }
+            }
         }
 
         for path in Self::find_root_paths() {
-            self.scan_root(&path, &mut all_models);
+            if scanned_paths.insert(path.clone()) {
+                self.scan_root(&path, &mut all_models, &mut scanned_paths);
+            }
         }
 
         Self::dedupe_models(&mut all_models);
@@ -132,9 +236,76 @@ impl ModelScanner {
         all_models
     }
 
-    fn scan_root(&self, root: &Path, models: &mut Vec<ModelInfo>) {
+    fn find_common_model_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Some(home) = dirs::home_dir() {
+            for dir in Self::COMMON_MODEL_DIRS {
+                let path = home.join(dir);
+                if path.exists() && path.is_dir() {
+                    dirs.push(path);
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(programdata) = std::env::var("ProgramData") {
+                let base = PathBuf::from(programdata);
+                for dir in Self::COMMON_MODEL_DIRS {
+                    let path = base.join(dir);
+                    if path.exists() && path.is_dir() {
+                        dirs.push(path);
+                    }
+                }
+            }
+
+            if let Ok(programfiles) = std::env::var("ProgramFiles") {
+                let path = PathBuf::from(programfiles).join("llama.cpp").join("models");
+                if path.exists() && path.is_dir() {
+                    dirs.push(path);
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let application_support = dirs::data_dir();
+            if let Some(base) = application_support {
+                for dir in Self::COMMON_MODEL_DIRS {
+                    let path = base.join(dir);
+                    if path.exists() && path.is_dir() {
+                        dirs.push(path);
+                    }
+                }
+            }
+        }
+
+        dirs
+    }
+
+    pub fn scan_paths(&self, paths: &[PathBuf]) -> Vec<ModelInfo> {
+        let mut all_models = Vec::new();
+
+        for base in paths {
+            if base.is_dir() {
+                let found = self.scan_directory(base);
+                all_models.extend(found);
+            } else if base.is_file() {
+                if let Some(info) = ModelInfo::from_path(base) {
+                    all_models.push(info);
+                }
+            }
+        }
+
+        Self::dedupe_models(&mut all_models);
+        all_models.sort_by_key(|model| Reverse(model.size_bytes));
+        all_models
+    }
+
+    fn scan_root(&self, root: &Path, models: &mut Vec<ModelInfo>, scanned: &mut std::collections::HashSet<PathBuf>) {
         let max_depth = 6;
-        self.scan_recursive(root, models, 0, max_depth);
+        self.scan_recursive(root, models, 0, max_depth, scanned);
     }
 
     fn scan_recursive(
@@ -143,10 +314,17 @@ impl ModelScanner {
         models: &mut Vec<ModelInfo>,
         depth: usize,
         max_depth: usize,
+        scanned: &mut std::collections::HashSet<PathBuf>,
     ) {
         if depth > max_depth {
             return;
         }
+
+        let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if scanned.contains(&canonical) {
+            return;
+        }
+        let _ = scanned.insert(canonical);
 
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -165,7 +343,7 @@ impl ModelScanner {
                         .unwrap_or_default();
 
                     if !SKIP_DIRS.contains(&name.as_str()) {
-                        self.scan_recursive(&path, models, depth + 1, max_depth);
+                        self.scan_recursive(&path, models, depth + 1, max_depth, scanned);
                     }
                 }
             }
@@ -273,23 +451,6 @@ impl ModelScanner {
 
         results.sort_by_key(|entry| Reverse(entry.1.len()));
         results
-    }
-
-    pub fn scan_paths(&self, paths: &[PathBuf]) -> Vec<ModelInfo> {
-        let mut models = Vec::new();
-        for base in paths {
-            if base.is_dir() {
-                let found = self.scan_directory(base);
-                models.extend(found);
-            } else if base.is_file() {
-                if let Some(info) = ModelInfo::from_path(base) {
-                    models.push(info);
-                }
-            }
-        }
-        Self::dedupe_models(&mut models);
-        models.sort_by_key(|model| Reverse(model.size_bytes));
-        models
     }
 
     fn is_gguf_file(path: &Path) -> bool {

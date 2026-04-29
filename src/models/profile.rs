@@ -369,6 +369,23 @@ impl Profile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCache {
+    pub model_paths: Vec<String>,
+    pub scan_timestamp: String,
+    pub scanned_folders: Vec<String>,
+}
+
+impl Default for ModelCache {
+    fn default() -> Self {
+        Self {
+            model_paths: Vec::new(),
+            scan_timestamp: String::new(),
+            scanned_folders: Vec::new(),
+        }
+    }
+}
+
 pub struct ProfileManager {
     config_dir: PathBuf,
 }
@@ -500,6 +517,67 @@ impl ProfileManager {
         let content = tokio::fs::read_to_string(&cache_path).await?;
         let hardware: HardwareInfo = toml::from_str(&content)?;
         Ok(Some(hardware))
+    }
+
+    fn model_cache_path(&self) -> PathBuf {
+        self.config_dir.join("models.toml")
+    }
+
+    pub async fn save_model_cache(&self, model_paths: &[String]) -> Result<()> {
+        let cache_path = self.model_cache_path();
+        let folders: Vec<String> = model_paths
+            .iter()
+            .filter_map(|p| {
+                std::path::Path::new(p)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .map(String::from)
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let cache = ModelCache {
+            model_paths: model_paths.to_vec(),
+            scan_timestamp: chrono::Utc::now().to_rfc3339(),
+            scanned_folders: folders,
+        };
+        let content = toml::to_string_pretty(&cache)?;
+        tokio::fs::write(&cache_path, content).await?;
+        info!("Model cache saved with {} models", model_paths.len());
+        Ok(())
+    }
+
+    pub async fn load_model_cache(&self) -> Result<Option<ModelCache>> {
+        let cache_path = self.model_cache_path();
+        if !cache_path.exists() {
+            return Ok(None);
+        }
+        let content = tokio::fs::read_to_string(&cache_path).await?;
+        let cache: ModelCache = toml::from_str(&content)?;
+        Ok(Some(cache))
+    }
+
+    pub fn get_cached_model_folders(&self) -> Vec<PathBuf> {
+        let cache_path = self.model_cache_path();
+        if !cache_path.exists() {
+            return Vec::new();
+        }
+        if let Ok(content) = std::fs::read_to_string(&cache_path) {
+            if let Ok(cache) = toml::from_str::<ModelCache>(&content) {
+                return cache
+                    .scanned_folders
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|p| p.exists())
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
+    pub async fn get_model_cache(&self) -> Result<Option<ModelCache>> {
+        self.load_model_cache().await
     }
 
     pub async fn list_all(&self) -> Result<Vec<(String, Profile)>> {
