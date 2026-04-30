@@ -1,32 +1,14 @@
 # Agent Instructions
 
-## Scope
-These instructions apply to all work in this repository.
+## Principles
 
-## Priority
 1. Fix the immediate task.
 2. Record reusable learnings in this file when warranted.
-3. Apply the learning to the current task if it helps.
+3. Apply prior learnings to the current task.
 
-## When to Learn
-Update this file when:
-- You make a mistake.
-- The user corrects you.
-- You discover a clearly better approach through testing or research.
+Update this file when: a mistake is made, the user corrects you, or a clearly better approach is discovered.
 
-## How to Learn
-For each learning, capture:
-- What failed.
-- Why it failed.
-- What to do instead.
-
-Convert the specific case into a reusable rule:
-
-```text
-If [condition], then [action] instead of [previous action].
-```
-
-Use this format:
+### Learning Format
 
 ```markdown
 ## [Category]: [Title]
@@ -35,131 +17,168 @@ Use this format:
 - **Example**: Concrete example, if useful
 ```
 
-Recommended categories:
-- `Code Style`
-- `Patterns`
-- `Pitfalls`
-- `Workflow`
+Categories: `Code Style`, `Patterns`, `Pitfalls`, `Workflow`
+
+---
 
 ## Engineering Standards
 
 ### Design
 - Keep types and functions focused on one responsibility.
-- Prefer small modules by domain when adding a new feature area.
-- Depend on typed results and traits instead of direct printing or tightly coupled logic.
-- Prefer composition of small checks/workflows over large monolithic commands.
+- Prefer small modules by domain for new feature areas.
+- Depend on typed results and traits over direct printing or tight coupling.
+- Compose small checks/workflows instead of monolithic commands.
 
-### Async and I/O
+### Async & I/O
 - Add timeouts to external I/O and long-running async operations.
-- Run independent async work concurrently when it improves latency.
-- Keep side effects at the edges of the system.
+- Run independent async work concurrently.
+- Keep side effects at the edges.
 
-### Errors and State
+### Errors & State
 - Return `Result` with useful context.
 - Model success, partial success, timeout, and failure states explicitly.
-- Do not conflate different failure modes into one generic path.
+- Do not conflate different failure modes.
 
-### DRY and CLI UX
-- Reuse shared output/styling helpers instead of duplicating formatting.
-- Reuse shared state/result types where possible.
+### DRY & CLI UX
+- Reuse shared output/styling helpers.
+- Reuse shared state/result types.
 - Keep command output consistent and predictable.
+
+---
 
 ## Rust Workflow
 
 ### Before Editing
-- Inspect the existing module structure.
-- Find nearby patterns and follow them unless there is a strong reason not to.
-- Identify related modules, tests, and user-facing behavior that may be affected.
+1. Inspect the existing module structure.
+2. Find and follow nearby patterns.
+3. Identify related modules, tests, and user-facing behavior.
 
 ### During Refactoring
 - Keep functions small and focused.
-- Prefer typed diagnostic/check results over inline printing.
-- Fix closely related bugs you encounter when they are in scope and low-risk.
+- Prefer typed diagnostic results over inline printing.
+- Fix closely related bugs when in scope and low-risk.
 
 ### After Changes
-- Run `cargo check`.
-- Run `cargo test`.
-- Add or update unit, integration, or E2E tests when behavior changes.
-- Verify edge cases relevant to the change.
-
-Useful test commands:
+1. Run `cargo check`.
+2. Run `cargo test`.
+3. Add or update tests when behavior changes.
+4. Verify relevant edge cases.
 
 ```bash
 cargo check
 cargo test
 cargo test --lib
-cargo test --test unit
 cargo test --test integration
 cargo test --test e2e
 ```
 
+---
+
+## Architecture
+
+### Design Goals
+- One obvious entrypoint
+- Small focused commands
+- Fast default startup
+- Optional tuning only when asked
+
+### Source Structure
+
+```
+src/
+├── bin/llama.rs           # CLI entrypoint
+├── lib.rs                 # Library root
+├── errors.rs              # Error types
+├── cli/                   # CLI (args, commands)
+├── docker/                # Docker client
+├── models/                # Profile management & GGUF scanning
+├── hardware/              # Hardware detection (CPU, GPU, RAM)
+├── diagnostics/           # Environment diagnostics
+└── utils/                 # Logging, platform, output
+```
+
+### Hardware Detection
+- Detects CPU, GPU, RAM, NVLink.
+- Platform-specific: Linux (`/proc`, `nvidia-smi`), macOS (`sysctl`), Windows (PowerShell/WMI).
+- GPU order: NVIDIA → AMD → Intel → Vulkan.
+
+### Docker Integration
+- Direct `docker` CLI invocation.
+- Auto-selects image by GPU:
+
+| GPU               | Image          |
+|-------------------|----------------|
+| NVIDIA CUDA >= 550| `server-cuda13`|
+| NVIDIA CUDA < 550 | `server-cuda`  |
+| AMD               | `server-rocm`  |
+| Intel             | `server-intel` |
+| Vulkan            | `server-vulkan`|
+| CPU-only          | `server`       |
+
+- Container health verified via `/health` endpoint.
+
+---
+
 ## Recorded Learnings
 
-## Patterns: Domain-Driven Modules
-- **Situation**: Adding a new feature area such as diagnostics, monitoring, or health checks
+### Patterns
+
+**Domain-Driven Modules**
+- **Situation**: Adding a new feature area
 - **Lesson**: Create a dedicated module tree instead of growing unrelated files
-- **Example**: Add `src/<feature>/mod.rs` with focused submodules
 
-## Patterns: Typed Diagnostic Results
+**Typed Diagnostic Results**
 - **Situation**: Implementing checks, probes, or detection logic
-- **Lesson**: Return typed state structs instead of printing directly inside the check
+- **Lesson**: Return typed state structs instead of printing inline
 - **Example**:
-```rust
-#[derive(Debug, Clone)]
-pub struct DiagnosticResult {
-    pub success: bool,
-    pub data: Option<Info>,
-    pub error: Option<String>,
-}
-```
+  ```rust
+  #[derive(Debug, Clone)]
+  pub struct DiagnosticResult {
+      pub success: bool,
+      pub data: Option<Info>,
+      pub error: Option<String>,
+  }
+  ```
 
-## Patterns: Parallel Async Operations
+**Parallel Async Operations**
 - **Situation**: Running multiple independent I/O-bound checks
-- **Lesson**: Use `tokio::join!` to execute them concurrently
-- **Example**:
-```rust
-let (a, b) = tokio::join!(check_a(), check_b());
-```
+- **Lesson**: Use `tokio::join!` for concurrency
+- **Example**: `let (a, b) = tokio::join!(check_a(), check_b());`
 
-## Patterns: Timeout External Operations
-- **Situation**: Network calls, subprocesses, or any async work that may hang
-- **Lesson**: Wrap the operation in a timeout with a reasonable bound
-- **Example**:
-```rust
-timeout(Duration::from_secs(5), async_operation).await
-```
+**Timeout External Operations**
+- **Situation**: Network calls, subprocesses, or async work that may hang
+- **Lesson**: Wrap in a timeout with a reasonable bound
+- **Example**: `timeout(Duration::from_secs(5), async_operation).await`
 
-## Patterns: Explicit State Handling
+**Explicit State Handling**
 - **Situation**: Operations with more than one meaningful outcome
 - **Lesson**: Represent states explicitly with enums or clear structs
-- **Example**: Distinguish success, partial success, timeout, and failure
 
-## Workflow: Fix Related Nearby Bugs
-- **Situation**: You find a clearly related bug while working in the same area
-- **Lesson**: Fix it when the scope is small and the behavior is well understood
-- **Example**: Correct a broken profile lookup while already refactoring profile management
+### Pitfalls
 
-## Pitfalls: Dry-Run Must Stay Offline
-- **Situation**: Implementing CLI dry-run flows for Docker-backed commands
-- **Lesson**: Do not require Docker CLI or daemon availability before rendering a dry-run command; only real execution paths should validate runtime dependencies
-- **Example**: `llmr serve --dry-run` should still print the final `docker run ...` command even when Docker is stopped
+**Dry-Run Must Stay Offline**
+- **Situation**: Implementing dry-run flows for Docker-backed commands
+- **Lesson**: Do not require Docker availability before rendering a dry-run command; only validate dependencies on real execution
 
-## Pitfalls: Unit Conversion In Hardware Detection
-- **Situation**: Translating OS-reported memory values into tuning heuristics
-- **Lesson**: Normalize units before storing or comparing them
-- **Example**: Convert Linux `/proc/meminfo` KiB to GiB and Windows adapter RAM bytes to MiB
+**Unit Conversion in Hardware Detection**
+- **Situation**: Translating OS-reported memory values into heuristics
+- **Lesson**: Normalize units before storing or comparing
+- **Example**: Convert Linux `/proc/meminfo` KiB to GiB, Windows RAM bytes to MiB
 
-## Workflow: Prefer High-Signal Tests
-- **Situation**: Adding or revising unit tests around simple enums, formatting, or conversions
-- **Lesson**: Test representative behavior and meaningful edge cases instead of writing one test per trivial branch or boilerplate display string
-- **Example**: For `errors.rs`, keep a small set of tests for user-facing messages and conversion variants instead of snapshot-testing every unused enum variant
+**Missing Imports in Conditional Compilation**
+- **Situation**: Using `cfg` attributes on code blocks referencing types like `Command`
+- **Lesson**: Make imports conditional with `#[cfg(...)]`
 
-## Pitfalls: Missing Imports in Conditional Compilation
-- **Situation**: Using `cfg` attributes on code blocks that reference types like `std::process::Command`
-- **Lesson**: Make imports conditional with `#[cfg(...)]` when the usage is conditionally compiled
-- **Example**: `#[cfg(target_os = "linux")] use std::process::Command;` instead of top-level `use std::process::Command`
+**Unnecessary Async Markers**
+- **Situation**: Marking functions as `async` without `.await` or spawned work
+- **Lesson**: Only use `async` when actually needed
 
-## Pitfalls: Unnecessary Async Markers
-- **Situation**: Marking functions as `async` when they don't use `.await` or spawn async work
-- **Lesson**: Only mark functions as `async` if they actually need to be async (use `.await` or return a future)
-- **Example**: `fn detect_cpu() -> Result<CpuInfo>` instead of `async fn detect_cpu() -> Result<CpuInfo>` when just running sync commands
+### Workflow
+
+**Fix Related Nearby Bugs**
+- **Situation**: Finding a clearly related bug in the same area
+- **Lesson**: Fix it when scope is small and behavior is well understood
+
+**Prefer High-Signal Tests**
+- **Situation**: Writing tests around simple enums, formatting, or conversions
+- **Lesson**: Test representative behavior and edge cases instead of one test per trivial branch

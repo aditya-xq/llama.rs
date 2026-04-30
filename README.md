@@ -1,4 +1,4 @@
-# llmr
+# llama.rs (aka llmr)
 
 A tiny CLI for running [llama.cpp](https://github.com/ggerganov/llama.cpp) in Docker with automatic hardware detection, model discovery, and optimized inference profiles.
 
@@ -136,62 +136,6 @@ Profiles are cached TOML files with hardware-specific settings, keyed by:
 
 Profiles store launch parameters to skip recomputing on subsequent runs. Use `--retune` to regenerate.
 
-## Architecture
-
-### Design Goals
-
-- One obvious entrypoint
-- Small focused commands
-- Fast default startup
-- Optional tuning only when you ask for it
-
-### Source Structure
-
-```
-src/
-├── bin/llama.rs           # CLI entrypoint
-├── lib.rs                 # Library root
-├── errors.rs              # Error types
-├── cli/
-│   ├── mod.rs             # CLI module
-│   ├── args.rs            # Argument parsing (clap)
-│   └── commands.rs        # Command implementations
-├── docker/
-│   ├── mod.rs             # Docker module
-│   └── client.rs          # Docker client
-├── models/
-│   ├── mod.rs             # Models module
-│   ├── profile.rs         # Profile management & benchmarking
-│   └── scanner.rs         # Model discovery & GGUF scanning
-├── hardware/
-│   └── mod.rs             # Hardware detection (CPU, GPU, RAM)
-├── diagnostics/
-│   └── mod.rs             # Environment diagnostics
-└── utils/
-    ├── mod.rs             # Utils module
-    ├── logger.rs          # Logging (tracing)
-    ├── platform.rs        # Platform detection
-    └── output.rs          # Output styling
-```
-
-### Hardware Detection
-
-Detects CPU, GPU, RAM, and NVLink. Platform-specific implementations for Linux (`/proc`, `nvidia-smi`), macOS (`sysctl`), and Windows (PowerShell/WMI).
-
-GPU detection order: NVIDIA → AMD → Intel → Vulkan.
-
-### Docker Integration
-
-Uses direct `docker` CLI invocation. Auto-selects image based on GPU:
-- NVIDIA CUDA >= 550: `server-cuda13`
-- NVIDIA CUDA < 550: `server-cuda`
-- AMD: `server-rocm`
-- Intel: `server-intel`
-- Vulkan: `server-vulkan`
-- CPU-only: `server`
-
-Container health verified via `/health` endpoint.
-
 ## Troubleshooting
 
 ### Docker daemon not running
@@ -199,12 +143,6 @@ Container health verified via `/health` endpoint.
 ```bash
 # Linux
 sudo systemctl start docker
-```
-
-### Model not found
-
-```bash
-ls -la /path/to/model.gguf
 ```
 
 ### Port already in use
