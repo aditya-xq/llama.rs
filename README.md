@@ -1,4 +1,4 @@
-# llama.rs (aka llmr)
+# llmr
 
 **Drop a GGUF in. Get an API out.** Zero config, auto-optimized.
 
