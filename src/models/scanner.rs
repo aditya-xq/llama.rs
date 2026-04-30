@@ -462,6 +462,9 @@ impl ModelScanner {
     fn dedupe_models(models: &mut Vec<ModelInfo>) {
         let mut seen = std::collections::HashSet::new();
         models.retain(|model| {
+            if model.name.to_lowercase().starts_with("mmproj-") {
+                return false;
+            }
             let key = model
                 .path
                 .canonicalize()

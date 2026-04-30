@@ -17,7 +17,6 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     Serve(ServeArgs),
-    Tune(TuneArgs),
     Status(StatusArgs),
     Stop(StopArgs),
     Profiles(ProfilesArgs),
@@ -41,9 +40,6 @@ pub struct ServeArgs {
 
     #[arg(long)]
     pub no_benchmark: bool,
-
-    #[arg(long)]
-    pub retune: bool,
 
     #[arg(long)]
     pub skip_hardware: bool,
@@ -91,24 +87,6 @@ pub struct ServeArgs {
     pub debug: bool,
 }
 
-#[derive(Parser, Debug)]
-pub struct TuneArgs {
-    #[arg(short, long)]
-    pub model: Option<String>,
-
-    #[arg(long)]
-    pub quick: bool,
-
-    #[arg(long)]
-    pub thorough: bool,
-
-    #[arg(long)]
-    pub dry_run: bool,
-
-    #[arg(short, long)]
-    pub output: Option<String>,
-}
-
 #[derive(ValueEnum, Clone, Copy, Debug)]
 pub enum SplitMode {
     Layer,
@@ -141,9 +119,6 @@ pub struct StopArgs {
 
     #[arg(long)]
     pub force: bool,
-
-    #[arg(short, long)]
-    pub all: bool,
 }
 
 #[derive(Parser, Debug)]

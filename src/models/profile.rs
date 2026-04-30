@@ -1,6 +1,5 @@
 use crate::errors::{Error, Result};
 use crate::hardware::HardwareInfo;
-use crate::utils::Style;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -103,6 +102,7 @@ impl Profile {
         ubatch.clamp(64, 512)
     }
 
+    #[allow(dead_code)]
     fn compute_gpu_layers(gpu: &Option<crate::hardware::GpuInfo>, model_size_bytes: u64) -> i32 {
         let Some(gpu) = gpu
             .as_ref()
@@ -114,6 +114,7 @@ impl Profile {
         Self::estimate_gpu_layers(gpu.vram_mb.iter().sum(), model_size_bytes)
     }
 
+    #[allow(dead_code)]
     fn estimate_gpu_layers(total_vram_mb: u64, model_size_bytes: u64) -> i32 {
         if total_vram_mb == 0 || model_size_bytes == 0 {
             return FULL_GPU_OFFLOAD_LAYERS;
@@ -143,6 +144,7 @@ impl Profile {
         }
     }
 
+    #[allow(dead_code)]
     fn compute_context_size(free_ram_gb: u32) -> u32 {
         if free_ram_gb >= 32 {
             65536
@@ -425,29 +427,11 @@ impl ProfileManager {
                 return Ok(profile);
             }
             info!("Loaded existing profile: {}", key);
-            let style = Style::plain();
-            println!(
-                "  {} Loaded profile: {} threads, {} batch, {} ctx, {} gpu layers",
-                style.success("✓"),
-                profile.threads,
-                profile.batch_size,
-                profile.context_size,
-                profile.gpu_layers
-            );
             Ok(profile)
         } else {
             info!("Creating new profile: {}", key);
             let profile = Profile::new(model_path.to_string(), model_size, hardware);
             self.save(&profile).await?;
-            let style = Style::plain();
-            println!(
-                "  {} Profile: {} threads, {} batch, {} ctx, {} gpu layers",
-                style.success("✓"),
-                profile.threads,
-                profile.batch_size,
-                profile.context_size,
-                profile.gpu_layers
-            );
             Ok(profile)
         }
     }

@@ -7,7 +7,6 @@ A tiny CLI for running [llama.cpp](https://github.com/ggerganov/llama.cpp) in Do
 - Automatic hardware detection (CPU, RAM, GPU, VRAM)
 - Smart model discovery - scans local drives for GGUF models
 - Optimized model inference profiles auto-generated for your hardware
-- Benchmark and tune configurations
 - Health check and metrics endpoints
 - Inference profile management
 - Cross-platform (Linux, macOS, Windows)
@@ -36,7 +35,7 @@ llmr doctor
 # Serve a model (auto-discovers GGUF models on your system)
 llmr serve
 
-# Stop server
+# Stop server(s)
 llmr stop
 ```
 
@@ -54,9 +53,8 @@ Options:
 - `-m, --model <path>` - Path to GGUF model file (auto-discovers if omitted)
 - `-p, --port <port>` - Server port (default: 8080)
 - `--metrics` - Enable metrics endpoint
-- `--benchmark` - Run benchmark before starting to find optimal config
-- `--no-benchmark` - Disable benchmark even if implied
-- `--retune` - Recompute profile for model
+- `--benchmark` - Run optimization benchmarks before starting
+- `--no-benchmark` - Skip optimization benchmarks, use cached/default profile
 - `--dry-run` - Print Docker command without running
 - `--public` - Bind to 0.0.0.0 instead of localhost
 - `--skip-hardware` - Skip hardware detection
@@ -72,22 +70,7 @@ Options:
 - `-n, --parallel <n>` - Parallel slots (default: 1)
 - `--debug` - Enable debug logging
 
-**First run**: When run without `--model`, the CLI scans your disks for GGUF files and caches the locations for faster startup on subsequent runs.
-
-### tune
-
-Benchmark and generate tuned configurations for a model.
-
-```bash
-llmr tune --model <path> [options]
-```
-
-Options:
-- `-m, --model <path>` - Path to GGUF model file (auto-discovers if omitted)
-- `--quick` - Run quick benchmark (fewer candidates)
-- `--thorough` - Run thorough benchmark (more candidates)
-- `--dry-run` - Print benchmark results without saving
-- `-o, --output <path>` - Output file for profile
+**First run**: When run without `--model`, the CLI scans your disks for GGUF files and caches the locations for faster startup on subsequent runs. On first serve, optimization benchmarks run automatically to find optimal configuration for your hardware.
 
 ### status
 
@@ -100,12 +83,11 @@ llmr status <name>
 
 ### stop
 
-Stop running containers.
+Stop running containers. Without a name, stops all llmr containers.
 
 ```bash
 llmr stop
 llmr stop <name>
-llmr stop --all
 llmr stop <name> --force
 ```
 

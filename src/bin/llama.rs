@@ -15,10 +15,6 @@ async fn main() -> llmr::Result<()> {
             let command = llmr::cli::ServeCommand::new(args, style);
             command.execute().await?;
         }
-        llmr::cli::Commands::Tune(args) => {
-            let command = llmr::cli::TuneCommand::new(args, style);
-            command.execute().await?;
-        }
         llmr::cli::Commands::Status(args) => {
             let command = llmr::cli::StatusCommand::new(args, style);
             command.execute().await?;
