@@ -32,12 +32,12 @@ fn test_cli_doctor() {
 }
 
 #[test]
-fn test_cli_serve_no_model() {
+fn test_cli_serve_no_model_interactive() {
     let mut cmd = Command::cargo_bin("llmr").unwrap();
     cmd.arg("serve")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("--model").or(predicate::str::contains("model")));
+        .success()
+        .stdout(predicate::str::contains("Select model"));
 }
 
 #[test]
@@ -217,18 +217,18 @@ fn test_cli_serve_dry_run_uses_runtime_overrides() {
 }
 
 #[test]
-fn test_cli_optimize_requires_model() {
+fn test_cli_tune_requires_model() {
     let mut cmd = Command::cargo_bin("llmr").unwrap();
-    cmd.arg("optimize")
+    cmd.arg("tune")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("model"));
+        .success()
+        .stdout(predicate::str::contains("Select model"));
 }
 
 #[test]
-fn test_cli_optimize_dry_run() {
+fn test_cli_tune_dry_run() {
     let mut cmd = Command::cargo_bin("llmr").unwrap();
-    cmd.arg("optimize")
+    cmd.arg("tune")
         .arg("--model")
         .arg("nonexistent.gguf")
         .arg("--dry-run")
