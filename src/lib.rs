@@ -4,6 +4,7 @@ pub mod docker;
 pub mod errors;
 pub mod hardware;
 pub mod models;
+pub mod tuning;
 pub mod utils;
 
 pub use cli::{Args, Commands};

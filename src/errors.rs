@@ -23,6 +23,9 @@ pub enum Error {
     #[error("Timeout: {message}")]
     Timeout { message: String },
 
+    #[error("Other: {message}")]
+    Other { message: String },
+
     #[error("IO error: {source}")]
     IoError {
         #[from]

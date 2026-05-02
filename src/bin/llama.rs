@@ -27,6 +27,10 @@ async fn main() -> llmr::Result<()> {
             let command = llmr::cli::ProfilesCommand::new(args, style);
             command.execute().await?;
         }
+        llmr::cli::Commands::Tune(args) => {
+            let command = llmr::cli::TuneCommand::new(args, style);
+            command.execute().await?;
+        }
         llmr::cli::Commands::Doctor => {
             let command = llmr::cli::DoctorCommand::new(style);
             command.execute().await?;

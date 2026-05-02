@@ -4,8 +4,12 @@ use crate::docker::DockerClient;
 use crate::errors::{Error, Result};
 use crate::hardware::HardwareInfo;
 use crate::models::{ModelScanner, Profile, ProfileManager};
+use crate::tuning::{GgufExtractor, GgufFactsExtractor, HardwareProfile, LlamaCppProfile, OptimizeOptions, OptimizeError};
 use crate::utils::Style;
 use std::io::Write;
+use std::path::Path;
+use std::time::Duration;
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 pub struct ServeCommand {
@@ -49,34 +53,127 @@ impl ServeCommand {
             .profile_exists(&model_path, &hardware)
             .await?;
 
-        if is_new_profile {
-            println!(
-                "{}",
-                style.info("First run for this model - applying optimizations...")
-            );
-            std::io::stdout().flush()?;
-        }
+        let mut profile = if is_new_profile && !self.args.dry_run && !self.args.no_benchmark && !self.args.quick {
+            let run_tuning = if self.args.benchmark {
+                true
+            } else {
+                println!();
+                println!("  {} First run for this model", style.info("→"));
+                print!("  {} Would you like to tune for optimal performance? [Y/n]: ", style.info("→"));
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let answer = input.trim().to_lowercase();
+                answer.is_empty() || answer == "y" || answer == "yes"
+            };
 
-        let base_profile = profile_manager
-                .load_or_create(&model_path, &hardware)
-                .await?;
-
-        let enable_benchmark = self.args.benchmark && !self.args.no_benchmark && !self.args.dry_run;
-        let auto_optimize = is_new_profile && !self.args.no_benchmark && !self.args.dry_run;
-
-        let mut profile = if enable_benchmark || auto_optimize {
-            println!(
-                "  {} Running optimization benchmarks (this may take a few minutes)...",
-                style.info("→")
-            );
-            std::io::stdout().flush()?;
-            let optimized = profile_manager.benchmark(&model_path, &hardware).await?;
-            let mut final_profile = optimized;
-            final_profile.docker_image = base_profile.docker_image.clone();
-            println!("{} Optimization complete", style.success("✓"));
-            final_profile
+            if run_tuning {
+                println!("  {} Running tuning optimization...", style.info("→"));
+                std::io::stdout().flush()?;
+                
+                let extractor = GgufExtractor;
+                let facts = match extractor.extract(Path::new(&model_path)) {
+                    Ok(f) => {
+                        println!("    Architecture: {}", f.architecture);
+                        if let Some(ctx) = f.context_length {
+                            println!("    Context: {}", ctx);
+                        }
+                        f
+                    }
+                    Err(e) => {
+                        println!("  {} Could not parse GGUF metadata: {}", style.warning("!"), e);
+                        println!("  {} Proceeding with default tuning", style.info("→"));
+                        crate::tuning::GgufFacts {
+                            path: Path::new(&model_path).to_path_buf(),
+                            architecture: "llama".to_string(),
+                            model_name: None,
+                            size_label: None,
+                            quantization_version: None,
+                            file_type: None,
+                            alignment: None,
+                            context_length: Some(4096),
+                            embedding_length: None,
+                            block_count: Some(32),
+                            feed_forward_length: None,
+                            attention_head_count: None,
+                            attention_head_count_kv: None,
+                            rope_dimension_count: None,
+                            rope_scaling_type: None,
+                            rope_scaling_factor: None,
+                            rope_scaling_original_context_length: None,
+                            chat_template: None,
+                            tensor_count: 0,
+                            weight_bytes: 0,
+                        }
+                    }
+                };
+                
+                let hardware_profile: HardwareProfile = hardware.clone().into();
+                
+                let opts = OptimizeOptions {
+                    benchmark_ctx_size: Some(facts.context_length.unwrap_or(4096).min(4096)),
+                    prompt_tokens: 512,
+                    generation_tokens: 128,
+                    parallel_requests: 1,
+                    max_rounds: 4,
+                    min_relative_gain: 0.01,
+                    warmup_samples: 2,
+                    benchmark_samples: 5,
+                    early_stop_samples: 2,
+                    racing_keep_fraction: 0.25,
+                    coarse_budget_ms: 500,
+                    fine_budget_ms: 3000,
+                    search_strategy: crate::tuning::SearchStrategy::Racing,
+                };
+                
+                let docker_image = Profile::select_docker_image(&hardware.gpu);
+                let model_path_for_tune = model_path.clone();
+                
+                let tune_result = crate::tuning::optimize_llama_cpp_profile(
+                    &model_path,
+                    hardware_profile,
+                    &extractor,
+                    move |llama_profile| {
+                        let model_path = model_path_for_tune.clone();
+                        let docker_image = docker_image.clone();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                run_benchmark(&model_path, &docker_image, llama_profile,
+                                    opts.warmup_samples, opts.benchmark_samples,
+                                    opts.prompt_tokens, opts.generation_tokens).await
+                            })
+                        })
+                    },
+                    opts,
+                ).map_err(|e| {
+                    println!("  {} Tuning failed: {}", style.warning("!"), e);
+                    Error::Other { message: e.to_string() }
+                })?;
+                
+                let tuned_profile = convert_to_profile(&tune_result.profile, &model_path, &hardware);
+                let stats = tune_result.stats;
+                profile_manager.save(&tuned_profile).await?;
+                println!("{}  Tuning complete - profile saved", style.success("✓"));
+                println!("    Tested: {} candidates | Cache: {} entries", 
+                    stats.candidates_tested, stats.cache_size);
+                if let Some(best_result) = tune_result.profile.estimated_result.as_ref() {
+                    println!("    Result: prompt_tps={:.1} | decode_tps={:.1} | latency={:.0}ms | stability={:.0}%",
+                        best_result.prompt_tps,
+                        best_result.decode_tps,
+                        best_result.latency_ms,
+                        best_result.stability * 100.0);
+                }
+                tuned_profile
+            } else {
+                let base = profile_manager.load_or_create(&model_path, &hardware).await?;
+                println!("  {} Using default configuration", style.info("→"));
+                base
+            }
+        } else if is_new_profile {
+            println!("  {} Creating default profile", style.info("→"));
+            profile_manager.load_or_create(&model_path, &hardware).await?
         } else {
-            base_profile
+            profile_manager.load_or_create(&model_path, &hardware).await?
         };
 
         self.apply_serve_overrides(&mut profile);
@@ -461,10 +558,10 @@ impl StatusCommand {
         let style = &self.style;
 
         println!();
-        println!("  {}", style.title("Llama.cpp Containers"));
+        println!("  {}", style.title("Containers"));
         println!();
 
-        let containers = match docker_client.list_containers_by_prefix("llama_").await {
+        let containers = match docker_client.list_containers_by_prefix("llmr_").await {
             Ok(containers) => containers,
             Err(Error::DockerError { message }) => {
                 println!(
@@ -569,7 +666,7 @@ impl StopCommand {
 
     async fn stop_all_containers(&self, docker_client: &DockerClient) -> Result<()> {
         let style = &self.style;
-        let containers = match docker_client.list_containers_by_prefix("llama_").await {
+        let containers = match docker_client.list_containers_by_prefix("llmr_").await {
             Ok(containers) => containers,
             Err(Error::DockerError { message }) => {
                 println!(
@@ -582,7 +679,7 @@ impl StopCommand {
         };
 
         if containers.is_empty() {
-            println!("{}", style.muted("No running llama_* containers found."));
+            println!("{}", style.muted("No running llmr_* containers found."));
             return Ok(());
         }
 
@@ -779,5 +876,558 @@ impl VersionCommand {
         println!("llmr {}", env!("CARGO_PKG_VERSION"));
         println!("A tiny CLI for running optimised llama.cpp in Docker");
         Ok(())
+    }
+}
+
+pub struct TuneCommand {
+    args: TuneArgs,
+    style: Style,
+}
+
+impl TuneCommand {
+    pub fn new(args: TuneArgs, style: Style) -> Self {
+        Self { args, style }
+    }
+
+    pub async fn execute(&self) -> Result<()> {
+        let style = &self.style;
+        let model_path = if let Some(model) = &self.args.model {
+            if !Path::new(model).exists() {
+                return Err(Error::ModelNotFound { path: model.clone() });
+            }
+            model.clone()
+        } else {
+            match self.interactive_model_select().await? {
+                Some(p) => p,
+                None => {
+                    println!("{}", style.error("No model selected"));
+                    return Ok(());
+                }
+            }
+        };
+
+        println!();
+        println!("  {}", style.title("Tuning Profile"));
+        println!("  Model: {}", style.accent(&model_path));
+        println!();
+
+        println!("  {} Detecting hardware...", style.info("→"));
+        let hardware = crate::hardware::detect().await?;
+        println!(
+            "    CPU: {} cores ({} threads)",
+            hardware.cpu.cores, hardware.cpu.threads
+        );
+        if let Some(ref gpu) = hardware.gpu {
+            println!("    GPU: {} x {}", gpu.names.join(", "), gpu.type_);
+            let total_vram: u64 = gpu.vram_mb.iter().sum();
+            println!("    VRAM: {} MB", total_vram);
+        }
+        println!("    RAM: {} GB", hardware.ram.total_gb);
+        println!();
+
+        println!("  {} Extracting GGUF metadata...", style.info("→"));
+        let extractor = GgufExtractor;
+        let facts = extractor
+            .extract(Path::new(&model_path))
+            .map_err(|e| Error::Other { message: format!("Failed to parse GGUF: {e}") })?;
+        println!("    Architecture: {}", facts.architecture);
+        if let Some(ctx) = facts.context_length {
+            println!("    Context Length: {}", ctx);
+        }
+        if let Some(layers) = facts.block_count {
+            println!("    Layers: {}", layers);
+        }
+        println!();
+
+        println!("  {} Running optimization benchmarks...", style.info("→"));
+        std::io::stdout().flush()?;
+
+        let hardware_profile: crate::tuning::HardwareProfile = hardware.clone().into();
+        
+        let opts = OptimizeOptions {
+            benchmark_ctx_size: Some(facts.context_length.unwrap_or(4096).min(4096)),
+            prompt_tokens: self.args.prompt_tokens.unwrap_or(512),
+            generation_tokens: self.args.generation_tokens.unwrap_or(128),
+            parallel_requests: 1,
+            max_rounds: if self.args.quick { 1 } else { self.args.max_rounds.unwrap_or(4) },
+            min_relative_gain: 0.01,
+            warmup_samples: 2,
+            benchmark_samples: 5,
+            early_stop_samples: 2,
+            racing_keep_fraction: 0.25,
+            coarse_budget_ms: 500,
+            fine_budget_ms: 3000,
+            search_strategy: crate::tuning::SearchStrategy::Racing,
+        };
+
+        let model_path_for_bench = model_path.clone();
+        let docker_image = Profile::select_docker_image(&hardware.gpu);
+        
+let result = crate::tuning::optimize_llama_cpp_profile(
+                    &model_path,
+                    hardware_profile,
+                    &extractor,
+                    move |llama_profile| {
+                        let model_path = model_path_for_bench.clone();
+                        let docker_image = docker_image.clone();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                run_benchmark(&model_path, &docker_image, llama_profile,
+                                    opts.warmup_samples, opts.benchmark_samples,
+                                    opts.prompt_tokens, opts.generation_tokens).await
+                            })
+                        })
+                    },
+                    opts,
+                ).map_err(|e| Error::Other { message: format!("Optimization failed: {e}") })?;
+
+        let profile = &result.profile;
+        let stats = result.stats;
+        
+        println!();
+        println!("  {} Best configuration found:", style.success("✓"));
+        println!("    Tested: {} candidates | Cache: {} entries", 
+            stats.candidates_tested, stats.cache_size);
+        println!("    Threads: {} | Batch: {} | UBatch: {}", profile.threads, profile.batch_size, profile.ubatch_size);
+        println!("    GPU Layers: {:?}", profile.n_gpu_layers);
+        println!("    Split Mode: {:?}", profile.split_mode);
+        println!("    Cache Type K: {:?}", profile.cache_type_k);
+        println!("    Cache Type V: {:?}", profile.cache_type_v);
+        if let Some(ref res) = profile.estimated_result {
+            println!("    Estimated: prompt={:.1}, decode={:.1} tok/s, latency={:.0}ms",
+                res.prompt_tps, res.decode_tps, res.latency_ms);
+        }
+        println!();
+
+        if self.args.dry_run {
+            println!("  {} Dry run - not saving profile", style.info("→"));
+            println!();
+            println!("  Command-line args:");
+            for arg in profile.to_cli_args() {
+                println!("    {}", arg);
+            }
+            return Ok(());
+        }
+
+        let profile = convert_to_profile(&profile, &model_path, &hardware);
+
+        let profile_manager = ProfileManager::new();
+        profile_manager.save(&profile).await?;
+
+        println!(
+            "{}  Profile saved for model '{}'",
+            style.success("✓"),
+            style.accent(&profile.model_file)
+        );
+        println!("    Key: {}", style.muted(profile.key()));
+
+        Ok(())
+    }
+
+    async fn interactive_model_select(&self) -> Result<Option<String>> {
+        let style = &self.style;
+        let scanner = ModelScanner::new();
+
+        println!();
+        println!("  {}", style.title("Searching for GGUF models..."));
+        println!();
+
+        let profile_manager = ProfileManager::new();
+        let cached_folders = profile_manager.get_cached_model_folders();
+        let quick_scan_results = if !cached_folders.is_empty() {
+            println!("  {} Checking cached locations...", style.info("→"));
+            scanner.scan_paths(&cached_folders)
+        } else {
+            Vec::new()
+        };
+
+        let all = if !quick_scan_results.is_empty() {
+            quick_scan_results
+        } else {
+            println!("  {} Scanning disks for GGUF files...", style.info("→"));
+            scanner.scan_disks()
+        };
+
+        if all.is_empty() {
+            println!(
+                "  {} No GGUF models found on local disks",
+                style.warning("!")
+            );
+            println!();
+            print!("  {} Enter model path manually: ", style.info("→"));
+            std::io::stdout().flush()?;
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let path = input.trim().to_string();
+            if path.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(path));
+        }
+
+        println!(
+            "  {} Found {} model(s)",
+            style.success("✓"),
+            style.accent(&all.len().to_string())
+        );
+        println!();
+
+        for (i, model) in all.iter().take(20).enumerate() {
+            println!(
+                "  {}.  {}  {}",
+                i + 1,
+                style.accent(&model.name),
+                style.muted(&model.size_formatted)
+            );
+        }
+
+        println!();
+        print!("  {} Select model (1-{}): ", style.info("→"), all.len());
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        let choice: usize = input.trim().parse().unwrap_or(0);
+        if choice == 0 || choice > all.len() {
+            println!("{}", style.error("Invalid selection"));
+            return Ok(None);
+        }
+
+        let selected = &all[choice - 1];
+        Ok(Some(selected.path.to_string_lossy().to_string()))
+    }
+}
+
+async fn run_benchmark(
+    model_path: &str,
+    docker_image: &str,
+    llama_profile: &LlamaCppProfile,
+    warmup_samples: usize,
+    benchmark_samples: usize,
+    prompt_tokens: u32,
+    generation_tokens: u32,
+) -> std::result::Result<crate::tuning::BenchmarkResult, OptimizeError> {
+    use tokio::process::Command as TokioCommand;
+
+    let port = find_free_port(18090);
+    let container_name = format!("llmr_tune_bench_{}", std::process::id());
+
+    let model_dir = Path::new(model_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".");
+    let model_file = Path::new(model_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("model.gguf");
+
+    let args = {
+        let mut args = llama_profile.to_cli_args();
+        if let Some(idx) = args.iter().position(|a| a == "-m") {
+            if idx + 1 < args.len() {
+                args[idx + 1] = format!("/models/{}", model_file);
+            }
+        }
+        args.push("--no-mmap".to_string());
+        args
+    };
+
+    let mut docker_args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        container_name.clone(),
+    ];
+    if Profile::is_gpu_image(docker_image) {
+        docker_args.extend(["--gpus".to_string(), "all".to_string()]);
+    }
+    docker_args.extend([
+        "-v".to_string(),
+        format!("{}:/models:ro", model_dir),
+        "-p".to_string(),
+        format!("{}:8080", port),
+        docker_image.to_string(),
+    ]);
+
+    let output = TokioCommand::new("docker")
+        .args(&docker_args)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| OptimizeError::Io(e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("  Docker run failed: {}", stderr);
+        return Err(OptimizeError::Benchmark(stderr.to_string()));
+    }
+
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    eprint!("    → Testing (t={},b={},ub={}) ... ",
+        llama_profile.threads,
+        llama_profile.batch_size,
+        llama_profile.ubatch_size
+    );
+    std::io::stdout().flush()?;
+    let healthy = loop {
+        if start.elapsed().as_secs() > 180 {
+            eprintln!("    → Container timeout - fetching logs...");
+            let logs = TokioCommand::new("docker")
+                .args(["logs", &container_name])
+                .output()
+                .await;
+            if let Ok(logs) = logs {
+                let log_err = String::from_utf8_lossy(&logs.stderr);
+                if !log_err.is_empty() {
+                    let lines: Vec<&str> = log_err.lines().collect();
+                    let last_30 = lines.iter().rev().take(30).rev().copied().collect::<Vec<_>>().join("\n");
+                    eprintln!("    Container stderr (last 30 lines):\n{}", last_30);
+                }
+            }
+            let _ = TokioCommand::new("docker")
+                .args(["rm", "-f", &container_name])
+                .output()
+                .await;
+            return Err(OptimizeError::Benchmark("Timeout waiting for container".to_string()));
+        }
+
+        if let Ok(resp) = client
+            .get(format!("http://127.0.0.1:{}/health", port))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
+            if resp.text().await.unwrap_or_default().contains("ok") {
+                break true;
+            }
+        }
+        if start.elapsed().as_secs() > 0 && start.elapsed().as_secs() % 15 == 0 {
+            eprint!(".");
+            let _ = std::io::stdout().flush();
+        }
+        sleep(Duration::from_secs(1)).await;
+    };
+
+    if !healthy {
+        let _ = TokioCommand::new("docker")
+            .args(["rm", "-f", &container_name])
+            .output()
+            .await;
+        return Err(OptimizeError::Benchmark("Container not healthy".to_string()));
+    }
+
+    let prompt = "Write a detailed explanation of quantum computing, covering superposition, entanglement, and quantum gates. Be thorough and include examples.".chars().take(prompt_tokens as usize).collect::<String>();
+    if prompt.len() < prompt_tokens as usize {
+        let repeat = (prompt_tokens as usize / prompt.len()) + 1;
+        let prompt = prompt.repeat(repeat);
+        let _prompt = prompt.chars().take(prompt_tokens as usize).collect::<String>();
+    }
+
+    let prompt_for_request = prompt.clone();
+    let gen_tokens = generation_tokens;
+
+    let run_single_request = async |client: &reqwest::Client, port: u16, prompt: &str, n_predict: u32| -> std::result::Result<(f32, f32, f32, u32), String> {
+        let request_body = serde_json::json!({
+            "prompt": prompt,
+            "n_predict": n_predict,
+            "temperature": 0,
+            "stream": false
+        });
+
+        let start = std::time::Instant::now();
+        let response = client
+            .post(format!("http://127.0.0.1:{}/completion", port))
+            .json(&request_body)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed <= 0.0 {
+            return Err("Invalid elapsed time".to_string());
+        }
+
+        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+let _tokens_predicted = json
+        .get("tokens_predicted")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(n_predict as u64) as f64;
+
+        let tokens_evaluated = json
+            .get("tokens_evaluated")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as f64;
+
+        let prompt_ms = json
+            .get("timings")
+            .and_then(|t| t.get("prompt_ms"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let tokens_predicted = json
+            .get("tokens_predicted")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as f64;
+
+        let predicted_ms = json
+            .get("timings")
+            .and_then(|t| t.get("predicted_ms"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let prompt_tps = if prompt_ms > 0.0 {
+            (tokens_evaluated / (prompt_ms / 1_000.0)) as f32
+        } else {
+            0.0
+        };
+
+        let decode_tps = if predicted_ms > 0.0 {
+            (tokens_predicted / (predicted_ms / 1_000.0)) as f32
+        } else {
+            0.0
+        };
+
+        let latency_ms = (elapsed * 1000.0) as f32;
+
+        Ok((prompt_tps, decode_tps, latency_ms, 0))
+    };
+
+    if warmup_samples > 0 {
+        eprint!(" [warmup");
+        for _ in 0..warmup_samples {
+            let _ = run_single_request(&client, port, &prompt_for_request, 16).await;
+            eprint!(".");
+        }
+        eprint!("]");
+    }
+
+    let mut runs = Vec::with_capacity(benchmark_samples);
+
+    for i in 0..benchmark_samples {
+        match run_single_request(&client, port, &prompt_for_request, gen_tokens).await {
+            Ok((prompt_tps, decode_tps, latency_ms, memory_mib)) => {
+                runs.push(crate::tuning::BenchmarkRun {
+                    prompt_tps,
+                    decode_tps,
+                    latency_ms,
+                    memory_mib,
+                    failed: false,
+                });
+                eprint!(".");
+            }
+            Err(e) => {
+                runs.push(crate::tuning::BenchmarkRun {
+                    prompt_tps: 0.0,
+                    decode_tps: 0.0,
+                    latency_ms: 0.0,
+                    memory_mib: 0,
+                    failed: true,
+                });
+                eprintln!("\n    → Run {} failed: {}", i + 1, e);
+            }
+        }
+        let _ = std::io::stdout().flush();
+    }
+
+    let _ = TokioCommand::new("docker")
+        .args(["rm", "-f", &container_name])
+        .output()
+        .await;
+
+    let result = crate::tuning::BenchmarkResult::from_runs(runs)
+        .ok_or_else(|| OptimizeError::Benchmark("All benchmark runs failed".to_string()))?;
+
+    println!(" ✓ prompt={:.1}, decode={:.1}, lat={:.0}ms, stable={:.1}%",
+        result.prompt_tps, result.decode_tps, result.latency_ms,
+        result.stability * 100.0);
+
+    Ok(result)
+}
+
+fn find_free_port(start: u16) -> u16 {
+    for port in start..start + 100 {
+        if std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok() {
+            return port;
+        }
+    }
+    start
+}
+
+fn convert_to_profile(llama_profile: &LlamaCppProfile, model_path: &str, hardware: &HardwareInfo) -> Profile {
+    let model_size = std::fs::metadata(model_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    
+    let gpu_count = hardware.gpu.as_ref().map(|g| g.names.len() as u32).unwrap_or(0);
+    let gpu_vram_total_mb = hardware.gpu.as_ref()
+        .map(|g| g.vram_mb.iter().sum())
+        .unwrap_or(0);
+
+    let gpu_layers = match llama_profile.n_gpu_layers {
+        crate::tuning::GpuLayerSpec::Exact(n) => n as i32,
+        crate::tuning::GpuLayerSpec::All => 999,
+        crate::tuning::GpuLayerSpec::Auto => 999,
+    };
+
+    let split_mode = match llama_profile.split_mode {
+        crate::tuning::SplitMode::None => "none",
+        crate::tuning::SplitMode::Layer => "layer",
+        crate::tuning::SplitMode::Row => "row",
+    }.to_string();
+
+    let cache_type_k = match llama_profile.cache_type_k {
+        crate::tuning::KvCacheType::F32 => "f32",
+        crate::tuning::KvCacheType::F16 => "f16",
+        crate::tuning::KvCacheType::BF16 => "bf16",
+        crate::tuning::KvCacheType::Q8_0 => "q8_0",
+        crate::tuning::KvCacheType::Q4_0 => "q4_0",
+        crate::tuning::KvCacheType::Q4_1 => "q4_1",
+        crate::tuning::KvCacheType::IQ4_NL => "iq4_nl",
+        crate::tuning::KvCacheType::Q5_0 => "q5_0",
+        crate::tuning::KvCacheType::Q5_1 => "q5_1",
+    }.to_string();
+
+    let cache_type_v = match llama_profile.cache_type_v {
+        crate::tuning::KvCacheType::F32 => "f32",
+        crate::tuning::KvCacheType::F16 => "f16",
+        crate::tuning::KvCacheType::BF16 => "bf16",
+        crate::tuning::KvCacheType::Q8_0 => "q8_0",
+        crate::tuning::KvCacheType::Q4_0 => "q4_0",
+        crate::tuning::KvCacheType::Q4_1 => "q4_1",
+        crate::tuning::KvCacheType::IQ4_NL => "iq4_nl",
+        crate::tuning::KvCacheType::Q5_0 => "q5_0",
+        crate::tuning::KvCacheType::Q5_1 => "q5_1",
+    }.to_string();
+
+    let docker_image = Profile::select_docker_image(&hardware.gpu);
+
+    let gpu_type = hardware.gpu.as_ref()
+        .map(|g| g.type_.clone())
+        .unwrap_or_else(|| "none".to_string());
+
+    Profile {
+        model_file: model_path.to_string(),
+        model_size_bytes: model_size,
+        cpu_cores: hardware.cpu.cores,
+        gpu_count,
+        gpu_vram_total_mb,
+        docker_image,
+        threads: llama_profile.threads as u32,
+        batch_size: llama_profile.batch_size,
+        ubatch_size: llama_profile.ubatch_size,
+        gpu_layers,
+        split_mode,
+        context_size: llama_profile.ctx_size,
+        cache_type_k,
+        cache_type_v,
+        parallel_slots: llama_profile.parallel as u32,
+        gpu_type,
+        has_nvlink: hardware.has_nvlink,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        best_tps: llama_profile.estimated_result.clone().map(|r| (r.prompt_tps as f64 + r.decode_tps as f64) / 2.0),
     }
 }

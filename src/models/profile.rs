@@ -3,17 +3,8 @@ use crate::hardware::HardwareInfo;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::time::Duration;
-use tokio::process::Command as TokioCommand;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
-const BENCH_TIMEOUT_SECS: u64 = 90;
-const BENCH_REQUEST_TIMEOUT_SECS: u64 = 180;
-const BENCH_HEALTH_TIMEOUT_SECS: u64 = 3;
-const BENCH_PROMPT: &str =
-    "Explain the theory of relativity in simple terms. What are its key implications?";
-const BENCH_PREDICT: u32 = 64;
 const FULL_GPU_OFFLOAD_LAYERS: i32 = 999;
 const ESTIMATED_MODEL_LAYERS: f64 = 32.0;
 
@@ -166,7 +157,7 @@ impl Profile {
         }
     }
 
-    fn select_docker_image(gpu: &Option<crate::hardware::GpuInfo>) -> String {
+    pub fn select_docker_image(gpu: &Option<crate::hardware::GpuInfo>) -> String {
         let registry = "ghcr.io/ggml-org/llama.cpp";
         match gpu {
             Some(g) if g.type_ == "nvidia" => {
@@ -253,7 +244,7 @@ impl Profile {
             .and_then(|n| n.to_str())
             .unwrap_or("model");
         let sanitized = Self::sanitize_identifier(safe_model, 40, "model");
-        format!("llama_{}", sanitized)
+        format!("llmr_{}", sanitized)
     }
 
     pub fn generate_key(&self) -> String {
@@ -586,6 +577,7 @@ impl ProfileManager {
     pub async fn list_all(&self) -> Result<Vec<(String, Profile)>> {
         let mut profiles = Vec::new();
         let hardware_cache = "hardware";
+        let model_cache = "models";
 
         let mut entries = tokio::fs::read_dir(&self.config_dir).await?;
 
@@ -596,7 +588,7 @@ impl ProfileManager {
                     .to_string_lossy()
                     .trim_end_matches(".toml")
                     .to_string();
-                if stem == hardware_cache {
+                if stem == hardware_cache || stem == model_cache {
                     continue;
                 }
                 if let Some(profile) = self.load(&stem).await? {
@@ -629,268 +621,16 @@ impl ProfileManager {
         Ok(profile)
     }
 
-    pub async fn benchmark(&self, model_path: &str, hardware: &HardwareInfo) -> Result<Profile> {
-        self.benchmark_impl(model_path, hardware, true).await
+    pub fn find_free_port(start: u16) -> u16 {
+    for port in start..start + 50 {
+        if std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok() {
+            return port;
+        }
     }
+    start
+}
 
-    pub async fn benchmark_preview(
-        &self,
-        model_path: &str,
-        hardware: &HardwareInfo,
-    ) -> Result<Profile> {
-        self.benchmark_impl(model_path, hardware, false).await
-    }
-
-    async fn benchmark_impl(
-        &self,
-        model_path: &str,
-        hardware: &HardwareInfo,
-        persist: bool,
-    ) -> Result<Profile> {
-        let model_size = Self::get_file_size(model_path)?;
-        let mut profile = Profile::new(model_path.to_string(), model_size, hardware);
-
-        info!("Running calibration benchmarks (~30s each)...");
-
-        let batch_candidates = if profile.batch_size != 512 {
-            vec![512, profile.batch_size]
-        } else {
-            vec![profile.batch_size]
-        };
-
-        let split_candidates = if profile.gpu_count > 1 {
-            vec!["layer".to_string(), "row".to_string()]
-        } else {
-            vec![profile.split_mode.clone()]
-        };
-
-        let mut best_tps = None;
-        let mut best_batch = profile.batch_size;
-        let mut best_ubatch = profile.ubatch_size;
-        let mut best_split = profile.split_mode.clone();
-
-        let bench_port = Self::find_free_port(18080);
-
-        for split in &split_candidates {
-            for batch in &batch_candidates {
-                let ubatch = (*batch / 4).clamp(64, 512);
-
-                info!(
-                    "  Benchmarking split={} batch={} ubatch={}",
-                    split, batch, ubatch
-                );
-
-                if let Some(tps) = Self::run_single_bench(
-                    model_path,
-                    &profile.docker_image,
-                    profile.threads,
-                    *batch,
-                    ubatch,
-                    profile.context_size,
-                    profile.gpu_layers,
-                    split,
-                    bench_port,
-                )
-                .await
-                {
-                    info!("  Result: {:.2} tokens/sec", tps);
-                    if best_tps.is_none_or(|best| tps > best) {
-                        best_tps = Some(tps);
-                        best_batch = *batch;
-                        best_ubatch = ubatch;
-                        best_split = split.clone();
-                    }
-                } else {
-                    warn!("  Benchmark run failed; skipping this candidate.");
-                }
-            }
-        }
-
-        let best_tps = best_tps.ok_or_else(|| Error::DockerError {
-            message: "All benchmark candidates failed; no optimized profile was saved".to_string(),
-        })?;
-
-        profile.batch_size = best_batch;
-        profile.ubatch_size = best_ubatch;
-        profile.split_mode = best_split;
-        profile.best_tps = Some(best_tps);
-
-        info!(
-            "Best config: split={} batch={} -> {:.2} t/s",
-            profile.split_mode, profile.batch_size, best_tps
-        );
-
-        if persist {
-            self.save(&profile).await?;
-        }
-        Ok(profile)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn run_single_bench(
-        model_path: &str,
-        docker_image: &str,
-        threads: u32,
-        batch: u32,
-        ubatch: u32,
-        ctx_size: u32,
-        gpu_layers: i32,
-        split_mode: &str,
-        port: u16,
-    ) -> Option<f64> {
-        let container_name = format!(
-            "llama_bench_{}_{}_{}_{}",
-            std::process::id(),
-            split_mode,
-            batch,
-            ubatch
-        );
-        let model_dir = Path::new(model_path)
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or(".");
-        let model_file = Path::new(model_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("model.gguf");
-
-        let mut args = vec![
-            "-m".to_string(),
-            format!("/models/{model_file}"),
-            "--host".to_string(),
-            "0.0.0.0".to_string(),
-            "--port".to_string(),
-            "8080".to_string(),
-            "-t".to_string(),
-            threads.to_string(),
-            "--threads-batch".to_string(),
-            threads.to_string(),
-            "-b".to_string(),
-            batch.to_string(),
-            "--ubatch-size".to_string(),
-            ubatch.to_string(),
-            "-c".to_string(),
-            ctx_size.to_string(),
-            "--log-disable".to_string(),
-        ];
-
-        if gpu_layers > 0 {
-            args.push("--n-gpu-layers".to_string());
-            args.push(gpu_layers.to_string());
-        }
-
-        if split_mode != "none" {
-            args.push("--split-mode".to_string());
-            args.push(split_mode.to_string());
-        }
-
-        let mut docker_args = vec![
-            "run".to_string(),
-            "-d".to_string(),
-            "--name".to_string(),
-            container_name.clone(),
-        ];
-        if Profile::is_gpu_image(docker_image) {
-            docker_args.extend(["--gpus".to_string(), "all".to_string()]);
-        }
-        docker_args.extend([
-            "-v".to_string(),
-            format!("{}:/models:ro", model_dir),
-            "-p".to_string(),
-            format!("{}:8080", port),
-            docker_image.to_string(),
-        ]);
-
-        let output = TokioCommand::new("docker")
-            .args(docker_args)
-            .args(args)
-            .output()
-            .await
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let client = reqwest::Client::new();
-        let start = std::time::Instant::now();
-        let healthy = loop {
-            if start.elapsed().as_secs() > BENCH_TIMEOUT_SECS {
-                Self::remove_bench_container(&container_name).await;
-                return None;
-            }
-
-            if let Ok(resp) = client
-                .get(format!("http://127.0.0.1:{}/health", port))
-                .timeout(Duration::from_secs(BENCH_HEALTH_TIMEOUT_SECS))
-                .send()
-                .await
-            {
-                if resp.text().await.unwrap_or_default().contains("ok") {
-                    break true;
-                }
-            }
-            sleep(Duration::from_secs(1)).await;
-        };
-
-        if !healthy {
-            Self::remove_bench_container(&container_name).await;
-            return None;
-        }
-
-        let request_body = serde_json::json!({
-            "prompt": BENCH_PROMPT,
-            "n_predict": BENCH_PREDICT,
-            "temperature": 0,
-            "stream": false
-        });
-
-        let start = std::time::Instant::now();
-        let response = client
-            .post(format!("http://127.0.0.1:{}/completion", port))
-            .json(&request_body)
-            .timeout(Duration::from_secs(BENCH_REQUEST_TIMEOUT_SECS))
-            .send()
-            .await;
-
-        Self::remove_bench_container(&container_name).await;
-
-        let response = match response {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-
-        let elapsed = start.elapsed().as_secs_f64();
-        if elapsed <= 0.0 {
-            return None;
-        }
-
-        let json: serde_json::Value = response.json().await.ok()?;
-        let tokens_predicted = json
-            .get("tokens_predicted")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(BENCH_PREDICT as u64) as f64;
-
-        Some(tokens_predicted / elapsed)
-    }
-
-    async fn remove_bench_container(container_name: &str) {
-        let _ = TokioCommand::new("docker")
-            .args(["rm", "-f", container_name])
-            .output()
-            .await;
-    }
-
-    fn find_free_port(start: u16) -> u16 {
-        for port in start..start + 50 {
-            if std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok() {
-                return port;
-            }
-        }
-        start
-    }
-
-    fn generate_key(&self, model_path: &str, hardware: &HardwareInfo) -> String {
+fn generate_key(&self, model_path: &str, hardware: &HardwareInfo) -> String {
         let model_basename = Path::new(model_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -1288,7 +1028,7 @@ mod tests {
         let profile = Profile::new("test_model.gguf".to_string(), 4_000_000_000, &hardware);
 
         let name = profile.container_name();
-        assert!(name.starts_with("llama_"));
+        assert!(name.starts_with("llmr_"));
         assert!(name.len() <= 50);
     }
 
@@ -1302,7 +1042,7 @@ mod tests {
         );
 
         let name = profile.container_name();
-        assert!(name.starts_with("llama_"));
+        assert!(name.starts_with("llmr_"));
         assert!(name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-'));
@@ -1313,7 +1053,7 @@ mod tests {
         let hardware = create_test_hardware();
         let profile = Profile::new("@#$%.gguf".to_string(), 4_000_000_000, &hardware);
 
-        assert_eq!(profile.container_name(), "llama_model");
+        assert_eq!(profile.container_name(), "llmr_model");
     }
 
     #[test]
@@ -1522,6 +1262,29 @@ mod tests {
 
         let profiles = pm.list_all().await.unwrap();
         assert_eq!(profiles.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_profile_manager_list_all_excludes_model_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let pm = ProfileManager::new_with_dir(temp_dir.path().to_path_buf());
+
+        let hardware = create_test_hardware();
+        let profile = Profile::new("model1.gguf".to_string(), 1_000_000_000, &hardware);
+        pm.save(&profile).await.unwrap();
+
+        let model_cache = ModelCache {
+            model_paths: vec!["test.gguf".to_string()],
+            scan_timestamp: "2026-05-02T00:00:00Z".to_string(),
+            scanned_folders: vec!["Z:\\AI\\llms".to_string()],
+        };
+        let cache_path = temp_dir.path().join("models.toml");
+        let content = toml::to_string_pretty(&model_cache).unwrap();
+        tokio::fs::write(&cache_path, content).await.unwrap();
+
+        let profiles = pm.list_all().await.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles[0].1.model_file.contains("model1.gguf"));
     }
 
     #[tokio::test]

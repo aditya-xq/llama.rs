@@ -20,6 +20,7 @@ pub enum Commands {
     Status(StatusArgs),
     Stop(StopArgs),
     Profiles(ProfilesArgs),
+    Tune(TuneArgs),
     Doctor,
     Version,
 }
@@ -52,6 +53,9 @@ pub struct ServeArgs {
 
     #[arg(long)]
     pub no_gpu: bool,
+
+    #[arg(long)]
+    pub quick: bool,
 
     #[arg(short, long)]
     pub auto: bool,
@@ -136,4 +140,25 @@ pub enum ProfilesSubcommand {
     Delete { key: String },
     Clear,
     Show { key: String },
+}
+
+#[derive(Parser, Debug)]
+pub struct TuneArgs {
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
+    #[arg(long)]
+    pub dry_run: bool,
+
+    #[arg(long)]
+    pub quick: bool,
+
+    #[arg(long)]
+    pub max_rounds: Option<usize>,
+
+    #[arg(long)]
+    pub prompt_tokens: Option<u32>,
+
+    #[arg(long)]
+    pub generation_tokens: Option<u32>,
 }
