@@ -1,4 +1,4 @@
-# llmr
+# llmr [WORK IN PROGRESS - NOT READY FOR USE]
 
 **Drop a GGUF in. Get an API out.** Zero config, auto-optimized.
 
