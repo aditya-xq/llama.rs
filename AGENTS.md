@@ -86,7 +86,7 @@ cargo test --test e2e
 
 ```
 src/
-├── bin/llama.rs           # CLI entrypoint
+├── bin/llmr.rs           # CLI entrypoint
 ├── lib.rs                 # Library root
 ├── errors.rs              # Error types
 ├── cli/                   # CLI (args, commands)
@@ -182,3 +182,13 @@ src/
 **Prefer High-Signal Tests**
 - **Situation**: Writing tests around simple enums, formatting, or conversions
 - **Lesson**: Test representative behavior and edge cases instead of one test per trivial branch
+
+## Pitfalls: Failed Tuning Must Not Produce Profiles
+- **Situation**: Tuning benchmarks depend on Docker or another external runner
+- **Lesson**: Start required services before tuning, propagate benchmark runner errors, and never turn failed benchmark candidates into zero-metric successful profiles
+- **Example**: If Docker is installed but the daemon is stopped, `serve` must attempt Docker startup before tuning and only print "Tuning complete" after successful benchmark results are saved
+
+## Patterns: Backend Boundaries Must Be Explicit
+- **Situation**: Adding or referencing inference backends beyond llama.cpp
+- **Lesson**: Keep planned backends in typed metadata, but reject serve/tune execution until their Docker args, health checks, and tuning profiles are implemented
+- **Example**: vLLM and SGLang can appear as planned `Backend` variants, but `Profile::server_args` must not silently reuse llama.cpp flags for them

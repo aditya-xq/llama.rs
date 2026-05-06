@@ -2,11 +2,11 @@
 name = "llmr"
 version = "1.0.0"
 edition = "2021"
-description = "A tiny rust based CLI for running auto-optimized inference via llama.cpp in Docker"
+description = "A tiny CLI for running optimized inference in Docker"
 license = "MIT"
-repository = "https://github.com/aditya-xq/llama.rs"
+repository = "https://github.com/aditya-xq/llmr"
 readme = "README.md"
-keywords = ["cli", "rust", "llama", "llama.cpp", "docker"]
+keywords = ["cli", "rust", "llm", "inference", "docker"]
 categories = ["command-line-utilities"]
 
 [dependencies]
@@ -15,14 +15,18 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.0"
-tokio = { version = "1.52", features = ["fs", "time", "process", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1.52", features = ["fs", "time", "process", "macros", "rt", "rt-multi-thread", "sync"] }
 which = "6.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6.0"
-chrono = "0.4"
-reqwest = { version = "0.13", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 sysinfo = "0.33"
+serde_yaml = "0.9"
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+tokio-stream = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -42,9 +46,32 @@ path = "tests/unit/mod.rs"
 name = "e2e"
 path = "tests/e2e/cli.rs"
 
+[[test]]
+name = "smoke"
+path = "tests/e2e/smoke.rs"
+
+[[test]]
+name = "errors"
+path = "tests/e2e/errors.rs"
+
+[[test]]
+name = "security"
+path = "tests/security/mod.rs"
+
+[[test]]
+name = "perf"
+path = "tests/perf/benchmark.rs"
+
 [[bin]]
 name = "llmr"
-path = "src/bin/llama.rs"
+path = "src/bin/llmr.rs"
+
+[[bin]]
+name = "llmr-bench"
+path = "src/bin/llmr-bench.rs"
+
+[lib]
+path = "src/lib.rs"
 
 [profile.dev]
 opt-level = 0
@@ -60,3 +87,7 @@ incremental = false
 
 [profile.release.package."*"]
 opt-level = 3
+
+[profile.release-with-deps]
+inherits = "release"
+debug = false

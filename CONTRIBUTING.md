@@ -6,8 +6,8 @@ We welcome contributions! Please follow these guidelines.
 
 ```bash
 # Clone the repository
-git clone https://github.com/aditya-xq/llama.rs.git
-cd llama.rs
+git clone https://github.com/aditya-xq/llmr.git
+cd llmr
 
 # Build the project
 cargo build
