@@ -507,6 +507,7 @@ async fn detect_nvlink() -> bool {
             tokio::process::Command::new("nvidia-smi")
                 .args(["nvlink", "--status"])
                 .output()
+                .await
                 .ok()
                 .map(|output| {
                     let stderr = String::from_utf8_lossy(&output.stderr);
