@@ -180,7 +180,7 @@ impl DockerClient {
                     message: format!("Failed to start Docker daemon: {}", stderr),
                 });
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
